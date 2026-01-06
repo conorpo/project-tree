@@ -1,6 +1,6 @@
 [package]
 name = "project-tree"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
 categories = ["command-line-utilities", "filesystem"]
 license = "MIT OR Apache-2.0"
@@ -13,3 +13,5 @@ keywords = ["tree", "directory", "file", "ascii", "command-line"]
 [dependencies]
 clap = { version = "4.2.7", features = ["derive"] }
 clipboard = "0.5.0"
+colored = "3.0.0"
+ignore = "0.4.25"
