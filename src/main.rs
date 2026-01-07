@@ -64,6 +64,7 @@ struct ProjectTree {
     ignore_list: HashSet<PathBuf>,
     stop_list: HashSet<PathBuf>,
     prioritize_dirs: bool,
+    gitignore: Option<Gitignore>,
 }
 
 impl ProjectTree {
@@ -76,17 +77,27 @@ impl ProjectTree {
             ignore_list,
             stop_list,
             prioritize_dirs,
+            gitignore: None,
         }
     }
 
     fn scan_folder(
-        &self,
+        &mut self,
         cur_path: &PathBuf,
         cur_prefix: String,
         show_lines: bool,
-        git_ignore: &Option<Gitignore>,
     ) -> io::Result<Vec<String>> {
         let mut files: Vec<String> = Vec::new();
+
+        // If this directory has a .gitignore file apply it for this and all subdirectories
+        let mut prev_gitignore = None;
+        let mut using_local_gitignore = false;
+        let gitignore_path = cur_path.join(".gitignore");
+        if let Ok(true) = fs::exists(&gitignore_path) {
+            prev_gitignore = self.gitignore.clone();
+            self.gitignore = Some(Gitignore::new(gitignore_path).0);
+            using_local_gitignore = true;
+        }
 
         let mut paths: Vec<PathBuf> = fs::read_dir(&cur_path)?
             .filter_map(|entry| {
@@ -123,7 +134,7 @@ impl ProjectTree {
 
             let mut colored_filename = filename.normal();
             let mut git_ignored = false;
-            if let Some(gitignore) = git_ignore {
+            if let Some(gitignore) = &self.gitignore {
                 if let Match::Ignore(_) = gitignore.matched(path, is_dir) {
                     colored_filename = filename.dimmed();
                     git_ignored = true;
@@ -145,12 +156,25 @@ impl ProjectTree {
                 let new_prefix = format!("{cur_prefix}{}", if is_last { "    " } else { "│   " });
 
                 let mut sub_files: Vec<String> =
-                    self.scan_folder(path, new_prefix, true, &git_ignore)?;
+                    self.scan_folder(path, new_prefix.clone(), true)?;
                 if git_ignored {
-                    sub_files = sub_files.iter().map(|s| s.dimmed().to_string()).collect();
+                    sub_files = sub_files
+                        .iter()
+                        .map(|s| s.strip_prefix(&new_prefix).unwrap_or(&s))
+                        .map(|s| s.dimmed().to_string())
+                        .map(|s| {
+                            let mut s2 = new_prefix.clone();
+                            s2.push_str(&s);
+                            s2
+                        })
+                        .collect();
                 }
                 files.append(&mut sub_files);
             }
+        }
+
+        if using_local_gitignore {
+            self.gitignore = prev_gitignore;
         }
 
         Ok(files)
@@ -189,21 +213,8 @@ fn main() -> io::Result<()> {
         stop_list.insert(PathBuf::from(stop));
     }
 
-    // If this project has a .gitignore file, use it to colour ignored files
-    let mut git_ignore: Option<Gitignore> = None;
-    let gitignore_path = PathBuf::from(".gitignore");
-    if let Ok(true) = fs::exists(&gitignore_path) {
-        println!("Using .gitignore");
-        git_ignore = Some(Gitignore::new(gitignore_path).0);
-    }
-
     let mut tree: String = ProjectTree::new(ignore_list, stop_list, args.dirs)
-        .scan_folder(
-            &PathBuf::from("./"),
-            String::from(""),
-            args.root,
-            &git_ignore,
-        )
+        .scan_folder(&PathBuf::from("./"), String::from(""), args.root)
         .unwrap()
         .join("\n");
 
