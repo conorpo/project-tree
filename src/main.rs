@@ -6,7 +6,7 @@
 //! Is HashMap<PathBuf> really the best way to do this?
 //!
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use clipboard::{ClipboardContext, ClipboardProvider};
 use colored::Colorize;
 use ignore::gitignore::Gitignore;
@@ -58,6 +58,50 @@ struct Args {
     /// Prioritize directories
     #[arg(short, long)]
     dirs: bool,
+
+    /// How to process entries specified in any .gitignore files
+    #[arg(value_enum)]
+    gitignore: Option<GitignoreOpt>,
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum GitignoreOpt {
+    /// Do not use .gitignore file
+    GiOff,
+    /// Ignore all files and directories specified in .gitignore
+    GiIgnore,
+    /// Do not recurse into directories specified in .gitignore
+    GiStop,
+    /// Color .gitignore enties a dimmer shade of grey
+    GiDim,
+    /// A combination of both gi-dim and gi-stop options [Default]
+    GiDimAndStop,
+}
+impl GitignoreOpt {
+    fn is_enabled(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiOff => false,
+            _ => true,
+        }
+    }
+    fn should_dim(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiDim | GitignoreOpt::GiDimAndStop => true,
+            _ => false,
+        }
+    }
+    fn should_ignore(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiIgnore => true,
+            _ => false,
+        }
+    }
+    fn should_stop(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiStop | GitignoreOpt::GiDimAndStop => true,
+            _ => false,
+        }
+    }
 }
 
 struct ProjectTree {
@@ -65,6 +109,7 @@ struct ProjectTree {
     stop_list: HashSet<PathBuf>,
     prioritize_dirs: bool,
     gitignore: Option<Gitignore>,
+    gitignore_option: GitignoreOpt,
 }
 
 impl ProjectTree {
@@ -72,12 +117,14 @@ impl ProjectTree {
         ignore_list: HashSet<PathBuf>,
         stop_list: HashSet<PathBuf>,
         prioritize_dirs: bool,
+        gitignore_option: GitignoreOpt,
     ) -> ProjectTree {
         ProjectTree {
             ignore_list,
             stop_list,
             prioritize_dirs,
             gitignore: None,
+            gitignore_option,
         }
     }
 
@@ -92,11 +139,13 @@ impl ProjectTree {
         // If this directory has a .gitignore file apply it for this and all subdirectories
         let mut prev_gitignore = None;
         let mut using_local_gitignore = false;
-        let gitignore_path = cur_path.join(".gitignore");
-        if let Ok(true) = fs::exists(&gitignore_path) {
-            prev_gitignore = self.gitignore.clone();
-            self.gitignore = Some(Gitignore::new(gitignore_path).0);
-            using_local_gitignore = true;
+        if self.gitignore_option.is_enabled() {
+            let gitignore_path = cur_path.join(".gitignore");
+            if let Ok(true) = fs::exists(&gitignore_path) {
+                prev_gitignore = self.gitignore.clone();
+                self.gitignore = Some(Gitignore::new(gitignore_path).0);
+                using_local_gitignore = true;
+            }
         }
 
         let mut paths: Vec<PathBuf> = fs::read_dir(&cur_path)?
@@ -108,6 +157,14 @@ impl ProjectTree {
                         .ignore_list
                         .contains(path.strip_prefix("./").unwrap_or(&path))
                     || self.ignore_list.contains(&PathBuf::from(entry.file_name()))
+                    || (self.gitignore_option.should_ignore()
+                        && self.gitignore.is_some()
+                        && self
+                            .gitignore
+                            .as_ref()
+                            .unwrap()
+                            .matched(&path, path.is_dir())
+                            .is_ignore())
                 {
                     None
                 } else {
@@ -136,7 +193,9 @@ impl ProjectTree {
             let mut git_ignored = false;
             if let Some(gitignore) = &self.gitignore {
                 if let Match::Ignore(_) = gitignore.matched(path, is_dir) {
-                    colored_filename = filename.dimmed();
+                    if self.gitignore_option.should_dim() {
+                        colored_filename = filename.dimmed();
+                    }
                     git_ignored = true;
                 }
             }
@@ -147,6 +206,7 @@ impl ProjectTree {
             ));
 
             if is_dir
+                && !(git_ignored && self.gitignore_option.should_stop())
                 && !self.stop_list.contains(path)
                 && !self
                     .stop_list
@@ -213,10 +273,15 @@ fn main() -> io::Result<()> {
         stop_list.insert(PathBuf::from(stop));
     }
 
-    let mut tree: String = ProjectTree::new(ignore_list, stop_list, args.dirs)
-        .scan_folder(&PathBuf::from("./"), String::from(""), args.root)
-        .unwrap()
-        .join("\n");
+    let mut tree: String = ProjectTree::new(
+        ignore_list,
+        stop_list,
+        args.dirs,
+        args.gitignore.unwrap_or(GitignoreOpt::GiDimAndStop),
+    )
+    .scan_folder(&PathBuf::from("./"), String::from(""), args.root)
+    .unwrap()
+    .join("\n");
 
     //Get Root Dir Name
     if args.root {
