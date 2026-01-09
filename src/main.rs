@@ -1,19 +1,20 @@
 //! # project-tree
-//! 
-//! A simple ascii file tree generator. 
-//! 
+//!
+//! A simple ascii file tree generator.
+//!
 //! TODO:
-//! Make ignore / stop check more elegant, is HashMap<PathBuf> really the best way to do this?
-//! 
+//! Is HashMap<PathBuf> really the best way to do this?
+//!
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use clipboard::{ClipboardContext, ClipboardProvider};
+use colored::Colorize;
+use ignore::gitignore::Gitignore;
+use ignore::Match;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::fs;
 use std::io;
-use clipboard::{ClipboardContext, ClipboardProvider};
-
-
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -42,39 +43,137 @@ struct Args {
     #[arg(long)]
     vscode: bool,
 
+    /// Recurse into target in Rust projects
+    #[arg(long)]
+    target: bool,
+
+    /// Do not copy to clipboard
+    #[arg(long)]
+    noclip: bool,
+
     /// Include root
     #[arg(short, long)]
     root: bool,
 
     /// Prioritize directories
     #[arg(short, long)]
-    dirs: bool
+    dirs: bool,
+
+    /// How to process entries specified in any .gitignore files
+    #[arg(value_enum)]
+    gitignore: Option<GitignoreOpt>,
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum GitignoreOpt {
+    /// Do not use .gitignore file
+    GiOff,
+    /// Ignore all files and directories specified in .gitignore
+    GiIgnore,
+    /// Do not recurse into directories specified in .gitignore
+    GiStop,
+    /// Color .gitignore enties a dimmer shade of grey
+    GiDim,
+    /// A combination of both gi-dim and gi-stop options [Default]
+    GiDimAndStop,
+}
+impl GitignoreOpt {
+    fn is_enabled(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiOff => false,
+            _ => true,
+        }
+    }
+    fn should_dim(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiDim | GitignoreOpt::GiDimAndStop => true,
+            _ => false,
+        }
+    }
+    fn should_ignore(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiIgnore => true,
+            _ => false,
+        }
+    }
+    fn should_stop(&self) -> bool {
+        match &self {
+            GitignoreOpt::GiStop | GitignoreOpt::GiDimAndStop => true,
+            _ => false,
+        }
+    }
 }
 
 struct ProjectTree {
     ignore_list: HashSet<PathBuf>,
     stop_list: HashSet<PathBuf>,
-    prioritize_dirs: bool
+    prioritize_dirs: bool,
+    gitignore: Option<Gitignore>,
+    gitignore_option: GitignoreOpt,
 }
 
 impl ProjectTree {
-    fn new(ignore_list: HashSet<PathBuf>, stop_list: HashSet<PathBuf>, prioritize_dirs: bool) -> ProjectTree {
+    fn new(
+        ignore_list: HashSet<PathBuf>,
+        stop_list: HashSet<PathBuf>,
+        prioritize_dirs: bool,
+        gitignore_option: GitignoreOpt,
+    ) -> ProjectTree {
         ProjectTree {
             ignore_list,
             stop_list,
-            prioritize_dirs
+            prioritize_dirs,
+            gitignore: None,
+            gitignore_option,
         }
     }
 
-    fn scan_folder(&self, cur_path: &PathBuf, cur_prefix: String, show_lines: bool) -> io::Result<Vec<String>> {
+    fn scan_folder(
+        &mut self,
+        cur_path: &PathBuf,
+        cur_prefix: String,
+        show_lines: bool,
+    ) -> io::Result<Vec<String>> {
         let mut files: Vec<String> = Vec::new();
 
-        let mut paths: Vec<PathBuf> = fs::read_dir(&cur_path)?.filter_map(|entry| {
-            let entry: fs::DirEntry = entry.ok()?;
-            let path: PathBuf = entry.path();
-            if self.ignore_list.contains(&path) { None } else { Some(path) }
-        }).collect();
+        // If this directory has a .gitignore file apply it for this and all subdirectories
+        let mut prev_gitignore = None;
+        let mut using_local_gitignore = false;
+        if self.gitignore_option.is_enabled() {
+            let gitignore_path = cur_path.join(".gitignore");
+            if let Ok(true) = fs::exists(&gitignore_path) {
+                prev_gitignore = self.gitignore.clone();
+                self.gitignore = Some(Gitignore::new(gitignore_path).0);
+                using_local_gitignore = true;
+            }
+        }
 
+        let mut paths: Vec<PathBuf> = fs::read_dir(&cur_path)?
+            .filter_map(|entry| {
+                let entry: fs::DirEntry = entry.ok()?;
+                let path: PathBuf = entry.path();
+                if self.ignore_list.contains(&path)
+                    || self
+                        .ignore_list
+                        .contains(path.strip_prefix("./").unwrap_or(&path))
+                    || self.ignore_list.contains(&PathBuf::from(entry.file_name()))
+                    || (self.gitignore_option.should_ignore()
+                        && self.gitignore.is_some()
+                        && self
+                            .gitignore
+                            .as_ref()
+                            .unwrap()
+                            .matched(&path, path.is_dir())
+                            .is_ignore())
+                {
+                    None
+                } else {
+                    Some(path)
+                }
+            })
+            .collect();
+
+        paths.sort_by_key(|path| path.to_string_lossy().to_lowercase());
         if self.prioritize_dirs {
             paths.sort_by_key(|path| !path.is_dir());
         }
@@ -91,57 +190,109 @@ impl ProjectTree {
             let filename: &std::ffi::OsStr = path.file_name().unwrap_or_default();
             let filename: &str = filename.to_str().unwrap_or_default();
 
-            files.push(format!("{cur_prefix}{affix}{filename}{}", if is_dir { "/" } else { "" }));     
+            let mut colored_filename = filename.normal();
+            let mut git_ignored = false;
+            if let Some(gitignore) = &self.gitignore {
+                if let Match::Ignore(_) = gitignore.matched(path, is_dir) {
+                    if self.gitignore_option.should_dim() {
+                        colored_filename = filename.dimmed();
+                    }
+                    git_ignored = true;
+                }
+            }
 
-            if is_dir && !self.stop_list.contains(path) {
+            files.push(format!(
+                "{cur_prefix}{affix}{colored_filename}{}",
+                if is_dir { "/" } else { "" }
+            ));
+
+            if is_dir
+                && !(git_ignored && self.gitignore_option.should_stop())
+                && !self.stop_list.contains(path)
+                && !self
+                    .stop_list
+                    .contains(path.strip_prefix("./").unwrap_or(&path))
+                && !self.stop_list.contains(&PathBuf::from(filename))
+            {
                 let new_prefix = format!("{cur_prefix}{}", if is_last { "    " } else { "│   " });
 
-                let mut sub_files: Vec<String> = self.scan_folder(path,new_prefix,true)?;
+                let mut sub_files: Vec<String> =
+                    self.scan_folder(path, new_prefix.clone(), true)?;
+                if git_ignored {
+                    sub_files = sub_files
+                        .iter()
+                        .map(|s| s.strip_prefix(&new_prefix).unwrap_or(&s))
+                        .map(|s| s.dimmed().to_string())
+                        .map(|s| {
+                            let mut s2 = new_prefix.clone();
+                            s2.push_str(&s);
+                            s2
+                        })
+                        .collect();
+                }
                 files.append(&mut sub_files);
             }
         }
 
-        
+        if using_local_gitignore {
+            self.gitignore = prev_gitignore;
+        }
 
         Ok(files)
     }
 }
 
-fn main() -> io::Result<()>{
+fn main() -> io::Result<()> {
     let args = Args::parse();
     let mut clipboard: ClipboardContext = ClipboardProvider::new().unwrap();
 
     let mut ignore_list: HashSet<PathBuf> = HashSet::new();
-    if !args.git { ignore_list.insert(PathBuf::from("./.git")); }
-    if !args.vscode { ignore_list.insert(PathBuf::from("./.vscode")); }
+    if !args.git {
+        ignore_list.insert(PathBuf::from(".git"));
+    }
+    if !args.vscode {
+        ignore_list.insert(PathBuf::from(".vscode"));
+    }
+
     for ignore in args.ignore {
-        //See next comment
-        if ignore.starts_with("./") {
-            ignore_list.insert(PathBuf::from(ignore));
-        } else {
-            ignore_list.insert(PathBuf::from(format!("./{}", ignore)));
-        }
+        ignore_list.insert(PathBuf::from(ignore));
     }
 
     let mut stop_list: HashSet<PathBuf> = HashSet::new();
-    if !args.node_modules { stop_list.insert(PathBuf::from("./node_modules")); }
-    for stop in args.stop {
-        //Yes yes its ugly but it works, I can't figure out how to hash a PathBuf and support relative paths
-        if stop.starts_with("./") {
-            stop_list.insert(PathBuf::from(stop));
-        } else {
-            stop_list.insert(PathBuf::from(format!("./{}", stop)));
+    if !args.node_modules {
+        stop_list.insert(PathBuf::from("node_modules"));
+    }
+
+    // If this is a Rust project stop at target dir unless target arg set
+    if !args.target {
+        if let Ok(true) = fs::exists("Cargo.toml") {
+            stop_list.insert(PathBuf::from("target"));
         }
     }
 
-    let mut tree: String = ProjectTree::new(ignore_list, stop_list, args.dirs)
-                                   .scan_folder(&PathBuf::from("./"), String::from(""), args.root)
-                                   .unwrap()
-                                   .join("\n");
+    for stop in args.stop {
+        stop_list.insert(PathBuf::from(stop));
+    }
+
+    let mut tree: String = ProjectTree::new(
+        ignore_list,
+        stop_list,
+        args.dirs,
+        args.gitignore.unwrap_or(GitignoreOpt::GiDimAndStop),
+    )
+    .scan_folder(&PathBuf::from("./"), String::from(""), args.root)
+    .unwrap()
+    .join("\n");
 
     //Get Root Dir Name
     if args.root {
-        let root_dir: String = std::env::current_dir().unwrap().file_name().unwrap().to_str().unwrap().to_owned();
+        let root_dir: String = std::env::current_dir()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
         tree = format!("{root_dir}\n{tree}");
     }
 
@@ -149,7 +300,13 @@ fn main() -> io::Result<()>{
     if let Some(output_file) = args.output {
         fs::write(output_file, &tree)?;
     }
-    clipboard.set_contents(tree).unwrap();
+
+    if !args.noclip {
+        clipboard.set_contents(tree).unwrap();
+    }
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

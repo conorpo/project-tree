@@ -1,16 +1,16 @@
 # project-tree
 
-A simple ascii file tree generator. Designed to be used in project root. By default it will print to stdout, and copy to clipboard. By default it will not recurse into node_modules, .git, or .vscode folders. I made this so I can give ChatGPT my project tree easily, and it can better understand the context of my projects.
+A simple ascii file tree generator. Designed to be used in project root. By default it will print to stdout, and copy to clipboard. By default it will not recurse into node_modules, .git, or .vscode folders. In Rust projects (where Cargo.toml is present) it will not recurse into the `target` directory. If a .gitignore file is found it will color the entries matched and not recurse into them. This behaviour can be overriden. I made this so I can give ChatGPT my project tree easily, and it can better understand the context of my projects.
 
 ```rust
 //! TODO:
-//! Make ignore / stop check more elegant, is HashMap<PathBuf> really the best way to do this?
+//! Is HashMap<PathBuf> really the best way to do this?
 ```
 
 ## Usage
 
 ```bash
-project-tree [flags] [options]
+project-tree [flags] [options] [gitignore]
 ```
 
 ## Flags
@@ -20,6 +20,8 @@ project-tree [flags] [options]
 | --node_modules | Include node_modules |
 | --git | Include .git |
 | --vscode | Include .vscode |
+| --target | Include contents of target in Rust projects |
+| --noclip | Do not copy to clipboard |
 | -r, --root | Include parent directory in tree, and indent all other files |
 | -d, --dirs | Prioritize directories over files (default alphabetical) |
 
@@ -30,6 +32,16 @@ project-tree [flags] [options]
 | -o, --output | path | Output file |
 | -i, --ignore | path | A file/folder to ignore, can be repeated |
 | -s, --stop | path | A file/folder to not recurse into, can be repeated |
+
+## GitIgnore
+
+| Value | Description |
+| --- | --- |
+| gi-off | Do not use .gitignore file |
+| gi-ignore | Ignore all entries specified in .gitignore |
+| gi-stop | Do not recurse into directories specified in .gitignore |
+| gi-dim | Color .gitignore enties a dimmer shade of grey |
+| gi-dim-and-stop | A combination of both gi-dim and gi-stop |
 
 ## Examples
 
