@@ -173,6 +173,7 @@ impl ProjectTree {
             })
             .collect();
 
+        paths.sort_by_key(|path| path.to_string_lossy().to_lowercase());
         if self.prioritize_dirs {
             paths.sort_by_key(|path| !path.is_dir());
         }
