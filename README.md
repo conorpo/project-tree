@@ -1,10 +1,10 @@
 # project-tree
 
-A simple ascii file tree generator. Designed to be used in project root. By default it will print to stdout, and copy to clipboard. By default it will not recurse into node_modules, .git, or .vscode folders. I made this so I can give ChatGPT my project tree easily, and it can better understand the context of my projects.
+A simple ascii file tree generator. Designed to be used in project root. By default it will print to stdout, and copy to clipboard. By default it will not recurse into node_modules, .git, or .vscode folders. In Rust projects (where Cargo.toml is present) it will not recurse into the `target` directory. I made this so I can give ChatGPT my project tree easily, and it can better understand the context of my projects.
 
 ```rust
 //! TODO:
-//! Make ignore / stop check more elegant, is HashMap<PathBuf> really the best way to do this?
+//! Is HashMap<PathBuf> really the best way to do this?
 ```
 
 ## Usage
@@ -20,6 +20,8 @@ project-tree [flags] [options]
 | --node_modules | Include node_modules |
 | --git | Include .git |
 | --vscode | Include .vscode |
+| --target | Include contents of target in Rust projects |
+| --noclip | Do not copy to clipboard |
 | -r, --root | Include parent directory in tree, and indent all other files |
 | -d, --dirs | Prioritize directories over files (default alphabetical) |
 
